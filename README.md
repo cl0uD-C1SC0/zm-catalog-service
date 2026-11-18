@@ -37,7 +37,7 @@ O catalog-service não participa das filas do RabbitMQ: ele só responde a chama
 
 ## Endpoints
 
-Prefixo: `/api/v1` · Swagger: `http://localhost:8001/docs`
+Prefixo: `/api/v1` · Swagger: `http://localhost:8001/docs` (compose) · `http://<minikube-ip>:30081/docs` (Kubernetes)
 
 | Método | Rota | Descrição |
 |---|---|---|
@@ -64,7 +64,9 @@ Prefixo: `/api/v1` · Swagger: `http://localhost:8001/docs`
 
 ## Como rodar
 
-Com o restante do ambiente, a partir da raiz do projeto: `docker compose up --build -d`.
+### Local (docker compose)
+
+Com o restante do ambiente, a partir da pasta onde fica o `docker-compose.yml`: `docker compose up --build -d`.
 
 Só este serviço:
 
@@ -72,6 +74,39 @@ Só este serviço:
 docker build -t catalog-service .
 docker run -p 8001:8000 -e DATABASE_URL=... catalog-service
 ```
+
+### Kubernetes
+
+Os manifestos deste serviço ficam em [`k8s/`](k8s/), no namespace `zm`:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `deployment.yaml` | 1 réplica, `initContainer` que espera o MySQL, probes em `/api/v1/health/live` e `/ready`, limites de CPU e memória |
+| `service.yaml` | NodePort `30081` |
+| `secret.yaml` | `DATABASE_URL` |
+
+A infraestrutura compartilhada (namespace `zm`, MySQL, MongoDB, RabbitMQ e Maildev) fica em [`k8s-infra/`](https://github.com/cl0uD-C1SC0/ZeMechanics/tree/feat/microservices/k8s-infra), no repositório principal, e é aplicada uma vez:
+
+```bash
+kubectl apply -f k8s-infra/   # uma vez (repositório principal)
+kubectl apply -f k8s/         # este serviço (o pipeline faz isso sozinho)
+```
+
+Acesso: `http://$(minikube ip):30081/docs`
+
+## CI/CD
+
+Pipeline próprio em [`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml), independente dos outros serviços. Roda em todo push e PR para a `main`.
+
+| Job | Onde roda | O que faz |
+|---|---|---|
+| `test` | `ubuntu-latest` (GitHub) | `pytest` com cobertura. **Falha se ficar abaixo de 80%** (`--cov-fail-under=80`) e anexa o `coverage.xml` |
+| `build` | `ubuntu-latest` (GitHub) | Build da imagem. Na `main`, publica `jayakuza/zm-catalog-service:<sha>` e `:latest` no Docker Hub |
+| `deploy` | runner self-hosted (VM com minikube) | Só na `main`: troca a tag do `deployment.yaml` pelo SHA do commit, `kubectl apply -f k8s/` e espera o rollout |
+
+Cada job depende do anterior (`needs`), então uma imagem só chega ao cluster se os testes passarem.
+
+Modelo híbrido: testes e build rodam nos runners do GitHub; só o deploy roda na VM, a única máquina que enxerga o cluster.
 
 ## Testes
 
@@ -81,6 +116,8 @@ DATABASE_URL="sqlite:///./test.db" pytest --cov=app --cov-report=term
 ```
 
 ### Cobertura
+
+Evidência: o relatório sai no log do job **Testes + cobertura** em [Actions](https://github.com/cl0uD-C1SC0/zm-catalog-service/actions), com o `coverage.xml` anexado como artefato. O pipeline barra qualquer commit abaixo de 80%.
 
 ```
 TOTAL    328 stmts    39 miss    88%
